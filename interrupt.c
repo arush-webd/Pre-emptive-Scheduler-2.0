@@ -1,89 +1,83 @@
 #include "interrupt.h"
-#include "common.h"
 
-// From entry.s
-extern "C" int disable_count;
+#define IDT_ENTRIES 256
 
-// ----------------- Critical sections -----------------
-extern "C" void enter_critical(void) {
-	cli();
-	disable_count++;
+struct __attribute__((packed)) idt_entry {
+  uint16_t base_lo;
+  uint16_t sel;
+  uint8_t  always0;
+  uint8_t  flags;
+  uint16_t base_hi;
+};
+
+struct __attribute__((packed)) idt_ptr {
+  uint16_t limit;
+  uint32_t base;
+};
+
+static struct idt_entry idt[IDT_ENTRIES];
+static struct idt_ptr   idtp;
+
+extern void irq0_entry(void);  // from entry.S
+
+static void idt_set_gate(int n, uint32_t base, uint16_t sel, uint8_t flags) {
+  idt[n].base_lo = base & 0xFFFF;
+  idt[n].base_hi = (base >> 16) & 0xFFFF;
+  idt[n].sel     = sel;
+  idt[n].always0 = 0;
+  idt[n].flags   = flags;
 }
 
-extern "C" void leave_critical(void) {
-	disable_count--;
-	if (disable_count == 0) sti();
+static inline void idt_load(struct idt_ptr* p) {
+  __asm__ volatile("lidt (%0)" : : "r"(p));
 }
 
-// ----------------- IDT -----------------
-typedef struct __attribute__((packed)) {
-	uint16_t offset_low;
-	uint16_t selector;
-	uint8_t  zero;
-	uint8_t  type_attr;
-	uint16_t offset_high;
-} idt_entry_t;
+void idt_init(void) {
+  idtp.limit = (sizeof(struct idt_entry) * IDT_ENTRIES) - 1;
+  idtp.base  = (uint32_t)&idt;
 
-typedef struct __attribute__((packed)) {
-	uint16_t limit;
-	uint32_t base;
-} idt_ptr_t;
+  for (int i = 0; i < IDT_ENTRIES; i++) {
+    idt_set_gate(i, 0, 0, 0);
+  }
 
-static idt_entry_t idt[256];
-static idt_ptr_t   idt_ptr;
+  // IRQ0 is 0x20 after PIC remap
+  idt_set_gate(0x20, (uint32_t)irq0_entry, 0x08, 0x8E);
 
-// assembly entry points from entry.s
-extern "C" void irq0_entry(void);
-extern "C" void irq7_entry(void);
-
-static void idt_set_gate(int n, uint32_t handler, uint16_t sel, uint8_t flags) {
-	idt[n].offset_low  = handler & 0xFFFF;
-	idt[n].selector    = sel;
-	idt[n].zero        = 0;
-	idt[n].type_attr   = flags;
-	idt[n].offset_high = (handler >> 16) & 0xFFFF;
+  idt_load(&idtp);
 }
 
-extern "C" void idt_init(void) {
-	for (int i = 0; i < 256; i++) idt_set_gate(i, 0, 0, 0);
+// Remap PIC to 0x20..0x2F
+void pic_remap(void) {
+  uint8_t a1 = inb(0x21);
+  uint8_t a2 = inb(0xA1);
 
-	// PIC remapped vectors
-	idt_set_gate(32, (uint32_t)irq0_entry, 0x08, 0x8E);
-	idt_set_gate(39, (uint32_t)irq7_entry, 0x08, 0x8E);
+  outb(0x20, 0x11);
+  outb(0xA0, 0x11);
 
-	idt_ptr.limit = sizeof(idt) - 1;
-	idt_ptr.base  = (uint32_t)&idt;
+  outb(0x21, 0x20);
+  outb(0xA1, 0x28);
 
-	__asm__ volatile ("lidt %0" : : "m"(idt_ptr));
+  outb(0x21, 0x04);
+  outb(0xA1, 0x02);
+
+  outb(0x21, 0x01);
+  outb(0xA1, 0x01);
+
+  outb(0x21, a1);
+  outb(0xA1, a2);
 }
 
-// ----------------- PIC + PIT -----------------
-extern "C" void pic_remap(void) {
-	uint8_t a1 = inb(0x21);
-	uint8_t a2 = inb(0xA1);
-
-	outb(0x11, 0x20);
-	outb(0x11, 0xA0);
-
-	outb(0x20, 0x21);
-	outb(0x28, 0xA1);
-
-	outb(0x04, 0x21);
-	outb(0x02, 0xA1);
-
-	outb(0x01, 0x21);
-	outb(0x01, 0xA1);
-
-	outb(a1, 0x21);
-	outb(a2, 0xA1);
-
-	// unmask IRQ0
-	outb(inb(0x21) & ~0x01, 0x21);
+void pit_init(uint32_t hz) {
+  // PIT base = 1193182 Hz
+  uint32_t div = 1193182 / hz;
+  outb(0x43, 0x36);
+  outb(0x40, (uint8_t)(div & 0xFF));
+  outb(0x40, (uint8_t)((div >> 8) & 0xFF));
 }
 
-extern "C" void pit_init(uint32_t hz) {
-	uint32_t divisor = 1193180 / hz;
-	outb(0x36, 0x43);
-	outb((uint8_t)(divisor & 0xFF), 0x40);
-	outb((uint8_t)((divisor >> 8) & 0xFF), 0x40);
+void irq0_install(void) {
+  // Unmask IRQ0 on PIC master
+  uint8_t mask = inb(0x21);
+  mask &= ~(1 << 0);
+  outb(0x21, mask);
 }
