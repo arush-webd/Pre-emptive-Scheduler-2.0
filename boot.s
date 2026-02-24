@@ -1,19 +1,13 @@
-.set ALIGN,    1<<0
-.set MEMINFO,  1<<1
-.set FLAGS,    ALIGN | MEMINFO
-.set MAGIC,    0x1BADB002
-.set CHECKSUM, -(MAGIC + FLAGS)
-
 .section .multiboot
 .align 4
-.long MAGIC
-.long FLAGS
-.long CHECKSUM
+.long 0x1BADB002
+.long 0x00000000
+.long -(0x1BADB002 + 0x00000000)
 
 .section .bss
 .align 16
 stack_bottom:
-.skip 16384
+  .skip 16384
 stack_top:
 
 .section .text
@@ -21,9 +15,12 @@ stack_top:
 .extern kernel_main
 
 _start:
-    mov $stack_top, %esp
-    call kernel_main
+  mov $stack_top, %esp
+
+  # GRUB puts: eax=magic, ebx=multiboot_info. We ignore for demo.
+  call kernel_main
+
 .hang:
-    cli
-    hlt
-    jmp .hang
+  cli
+  hlt
+  jmp .hang
